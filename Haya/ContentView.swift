@@ -57,7 +57,7 @@ struct ContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 18) {
-                    TextField("اسم البروفايل", text: $name)
+                    TextField("اسمك", text: $name)
                         .textFieldStyle(.roundedBorder)
 
                     measurementField(title: "الأكتاف", value: $shoulderWidth)
