@@ -5,14 +5,20 @@
 //  Created by Haya almousa on 19/04/2026.
 //
 
+import AuthenticationServices
+import Combine
 import PhotosUI
 import SwiftData
+import StoreKit
 import SwiftUI
 import UIKit
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Profile.updatedAt, order: .reverse) private var profiles: [Profile]
+
+    @StateObject private var sessionManager = SessionManager()
+    @StateObject private var purchaseManager = PurchaseManager()
 
     @State private var name = ""
     @State private var shoulderWidth = ""
@@ -21,6 +27,8 @@ struct ContentView: View {
     @State private var hips = ""
     @State private var selectedUndertone: Undertone = .neutral
     @State private var validationMessage = ""
+    @State private var showPaywall = false
+    @State private var pendingProfileCalculation = false
 
     private var activeProfile: Profile? {
         profiles.first
@@ -31,11 +39,68 @@ struct ContentView: View {
             Color.tallaBackground
                 .ignoresSafeArea()
 
-            if let profile = activeProfile {
+            if !sessionManager.isSignedIn {
+                signInView
+            } else if let profile = activeProfile {
                 AppShellView(profile: profile, onReset: deleteProfile)
             } else {
                 onboardingView
             }
+        }
+        .sheet(isPresented: $showPaywall) {
+            PaywallView(
+                purchaseManager: purchaseManager,
+                onClose: {
+                    showPaywall = false
+                    pendingProfileCalculation = false
+                }
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
+        .onChange(of: purchaseManager.hasUnlockedBodyAnalysis) { _, unlocked in
+            guard unlocked, pendingProfileCalculation else { return }
+            pendingProfileCalculation = false
+            showPaywall = false
+            saveProfile()
+        }
+    }
+
+    private var signInView: some View {
+        VStack(spacing: 28) {
+            Spacer()
+
+            Text("Haya")
+                .font(.system(size: 42, weight: .semibold, design: .serif))
+                .tracking(1)
+
+            VStack(spacing: 10) {
+                Text("ابدئي مع Apple")
+                    .font(.system(size: 30, weight: .semibold, design: .serif))
+                Text("سجلي دخولك أولًا حتى نحفظ بروفايلك، مشترياتك، وبيانات دولابك داخل التطبيق.")
+                    .font(.body)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 28)
+
+            SignInWithAppleButton(.signIn) { request in
+                request.requestedScopes = [.fullName, .email]
+            } onCompletion: { result in
+                sessionManager.handle(result: result)
+            }
+            .signInWithAppleButtonStyle(.black)
+            .frame(height: 54)
+            .padding(.horizontal, 24)
+
+            if let errorMessage = sessionManager.errorMessage {
+                Text(errorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 24)
+            }
+
+            Spacer()
         }
     }
 
@@ -49,9 +114,9 @@ struct ContentView: View {
                     .padding(.top, 18)
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("قياساتك وأناقتك")
+                    Text("قياساتك")
                         .font(.system(size: 32, weight: .semibold, design: .serif))
-                    Text("أدخلي قياساتك للحصول على توصيات تناسب شكل جسمك وألوانك.")
+                    Text("أدخلي قياساتك للحصول على توصيات تناسب شكل جسمك وبشرتك.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -79,7 +144,7 @@ struct ContentView: View {
                     }
 
                     Button("احسبي نوع جسمي") {
-                        saveProfile()
+                        handleCalculateTapped()
                     }
                     .buttonStyle(TallaPrimaryButtonStyle())
                 }
@@ -151,6 +216,15 @@ struct ContentView: View {
         waist = ""
         hips = ""
         selectedUndertone = .neutral
+    }
+
+    private func handleCalculateTapped() {
+        if purchaseManager.hasUnlockedBodyAnalysis {
+            saveProfile()
+        } else {
+            pendingProfileCalculation = true
+            showPaywall = true
+        }
     }
 }
 
@@ -1113,6 +1187,258 @@ private struct TallaPrimaryButtonStyle: ButtonStyle {
                     .fill(Color.tallaInk.opacity(configuration.isPressed ? 0.84 : 1))
             )
     }
+}
+
+private struct PaywallView: View {
+    @ObservedObject var purchaseManager: PurchaseManager
+    let onClose: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("فتح التحليل الشخصي")
+                            .font(.system(size: 30, weight: .semibold, design: .serif))
+                        Text("قبل استخدام ميزة تحليل الجسم والألوان، فعّلي الوصول من خلال الدفع داخل التطبيق.")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    TallaCard {
+                        VStack(alignment: .leading, spacing: 14) {
+                            Text("يشمل لك")
+                                .font(.headline)
+                            paywallFeature("تحليل نوع الجسم")
+                            paywallFeature("الأندرتون والألوان المناسبة")
+                            paywallFeature("حفظ النتيجة داخل البروفايل")
+                        }
+                    }
+
+                    if let product = purchaseManager.bodyAnalysisProduct {
+                        TallaCard {
+                            VStack(alignment: .leading, spacing: 14) {
+                                Text(product.displayName)
+                                    .font(.title3.bold())
+                                Text(product.description)
+                                    .foregroundStyle(.secondary)
+                                Text(product.displayPrice)
+                                    .font(.title.bold())
+
+                                if let purchaseError = purchaseManager.purchaseError {
+                                    Text(purchaseError)
+                                        .font(.footnote)
+                                        .foregroundStyle(.red)
+                                }
+
+                                Button("ادفعي الآن") {
+                                    Task {
+                                        await purchaseManager.purchaseBodyAnalysis()
+                                    }
+                                }
+                                .buttonStyle(TallaPrimaryButtonStyle())
+                                .disabled(purchaseManager.isPurchasing)
+
+                                Button("استعادة المشتريات") {
+                                    Task {
+                                        await purchaseManager.restorePurchases()
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                    } else {
+                        TallaCard {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("المنتج غير جاهز بعد")
+                                    .font(.headline)
+                                Text("أضيفي المنتج في App Store Connect أو StoreKit Configuration بهذا المعرّف:")
+                                    .foregroundStyle(.secondary)
+                                Text(PurchaseManager.bodyAnalysisProductID)
+                                    .font(.footnote.monospaced())
+                                    .foregroundStyle(Color.tallaTaupe)
+                                if let purchaseError = purchaseManager.purchaseError {
+                                    Text(purchaseError)
+                                        .font(.footnote)
+                                        .foregroundStyle(.red)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(20)
+            }
+            .background(Color.tallaBackground.ignoresSafeArea())
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("إغلاق", action: onClose)
+                }
+            }
+        }
+        .task {
+            await purchaseManager.loadProducts()
+        }
+    }
+
+    private func paywallFeature(_ text: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(Color.tallaSage)
+            Text(text)
+        }
+    }
+}
+
+@MainActor
+final class SessionManager: ObservableObject {
+    @Published private(set) var isSignedIn = false
+    @Published var errorMessage: String?
+
+    private let userIdentifierKey = "haya.apple_user_identifier"
+
+    init() {
+        let storedIdentifier = UserDefaults.standard.string(forKey: userIdentifierKey)
+        isSignedIn = storedIdentifier?.isEmpty == false
+    }
+
+    func handle(result: Result<ASAuthorization, Error>) {
+        switch result {
+        case .success(let authorization):
+            guard let credential = authorization.credential as? ASAuthorizationAppleIDCredential else {
+                errorMessage = "تعذر قراءة بيانات Apple ID."
+                return
+            }
+
+            UserDefaults.standard.set(credential.user, forKey: userIdentifierKey)
+            isSignedIn = true
+            errorMessage = nil
+        case .failure:
+            errorMessage = "فشل تسجيل الدخول عبر Apple ID."
+        }
+    }
+}
+
+@MainActor
+final class PurchaseManager: ObservableObject {
+    static let bodyAnalysisProductID = "haya.body_analysis_unlock"
+
+    @Published private(set) var hasUnlockedBodyAnalysis = false
+    @Published private(set) var bodyAnalysisProduct: Product?
+    @Published private(set) var isPurchasing = false
+    @Published var purchaseError: String?
+
+    private var updatesTask: Task<Void, Never>?
+
+    init() {
+        updatesTask = observeTransactionUpdates()
+
+        Task {
+            await loadProducts()
+            await refreshEntitlements()
+        }
+    }
+
+    deinit {
+        updatesTask?.cancel()
+    }
+
+    func loadProducts() async {
+        do {
+            let products = try await Product.products(for: [Self.bodyAnalysisProductID])
+            bodyAnalysisProduct = products.first
+            if bodyAnalysisProduct == nil {
+                purchaseError = "ما زال منتج الدفع غير مضاف في App Store Connect أو ملف StoreKit المحلي."
+            } else {
+                purchaseError = nil
+            }
+        } catch {
+            purchaseError = "تعذر تحميل منتجات الدفع."
+        }
+    }
+
+    func purchaseBodyAnalysis() async {
+        guard let product = bodyAnalysisProduct else {
+            purchaseError = "المنتج غير متاح حاليًا."
+            return
+        }
+
+        isPurchasing = true
+        defer { isPurchasing = false }
+
+        do {
+            let result = try await product.purchase()
+
+            switch result {
+            case .success(let verification):
+                let transaction = try checkVerified(verification)
+                await unlock(using: transaction)
+                await transaction.finish()
+                purchaseError = nil
+            case .pending:
+                purchaseError = "العملية ما زالت معلقة من Apple."
+            case .userCancelled:
+                purchaseError = nil
+            @unknown default:
+                purchaseError = "نتيجة شراء غير معروفة."
+            }
+        } catch {
+            purchaseError = "فشل إتمام الدفع."
+        }
+    }
+
+    func restorePurchases() async {
+        do {
+            try await AppStore.sync()
+            await refreshEntitlements()
+        } catch {
+            purchaseError = "تعذر استعادة المشتريات."
+        }
+    }
+
+    func refreshEntitlements() async {
+        var unlocked = false
+
+        for await result in StoreKit.Transaction.currentEntitlements {
+            guard let transaction = try? checkVerified(result) else { continue }
+            if transaction.productID == Self.bodyAnalysisProductID,
+               transaction.revocationDate == nil {
+                unlocked = true
+            }
+        }
+
+        hasUnlockedBodyAnalysis = unlocked
+    }
+
+    private func observeTransactionUpdates() -> Task<Void, Never> {
+        Task(priority: .background) { [weak self] in
+            guard let self else { return }
+
+            for await result in StoreKit.Transaction.updates {
+                guard let transaction = try? self.checkVerified(result) else { continue }
+                await self.unlock(using: transaction)
+                await transaction.finish()
+            }
+        }
+    }
+
+    private func unlock(using transaction: StoreKit.Transaction) async {
+        if transaction.productID == Self.bodyAnalysisProductID,
+           transaction.revocationDate == nil {
+            hasUnlockedBodyAnalysis = true
+        }
+    }
+
+    private func checkVerified<T>(_ result: VerificationResult<T>) throws -> T {
+        switch result {
+        case .verified(let safe):
+            return safe
+        case .unverified:
+            throw PurchaseVerificationError.failed
+        }
+    }
+}
+
+private enum PurchaseVerificationError: Error {
+    case failed
 }
 
 private extension Color {
